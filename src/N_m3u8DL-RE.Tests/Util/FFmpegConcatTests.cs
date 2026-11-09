@@ -42,7 +42,9 @@ public class FFmpegConcatTests
     [InlineData(1024, 2048, 3072, 0)] // continuous
     [InlineData(1080, 1990, 3072, 0)] // small positive and negative packet rounding
     [InlineData(1024, 4608, 5632, 3)] // cumulative missing fraction rounds to nearest
-    [InlineData(1024, 1400, 3000, -1)] // would have to delete original audio
+    [InlineData(1024, 1400, 3000, 0)] // a short overlap needs no padding or packet deletion
+    [InlineData(3072, 3072, 8192, 5)] // two missing frames, coincident splice PTS, then three more
+    [InlineData(1024, -900000, 3072, -1)] // large backward discontinuity
     [InlineData(1024, 900000, 901024, -1)] // source clock discontinuity
     public void SparsePacketPlanRespectsUncertainBoundaries(int second, int third, int fourth, int expected)
     {

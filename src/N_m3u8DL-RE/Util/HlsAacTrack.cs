@@ -44,7 +44,12 @@ internal static class AacPacketClock
         foreach (var i in indices)
         {
             var plan = Plan(System.IO.Path.Combine(tempDir, $"{i}.crc"), token);
-            if (plan == null || plan.Insertions.Count == 0)
+            if (plan == null)
+            {
+                Logger.Warn(ResString.aacClockProbeFailed);
+                continue;
+            }
+            if (plan.Insertions.Count == 0)
                 continue;
             var raw = System.IO.Path.Combine(tempDir, $"{i}.aac");
             var result = System.IO.Path.Combine(tempDir, $"{i}-filled.aac");
@@ -87,10 +92,11 @@ internal static class AacPacketClock
                 var expected = ((double)pts - start.Value) * timeBase * rate / SamplesPerFrame;
                 var deficit = expected - frames - inserted;
                 var missing = Math.Max(0, Math.Floor(deficit + 0.5));
-                // Negative drift would require deleting original packets. Large jumps are
-                // timestamp discontinuities, not safe evidence of lost audio (FFmpeg's default
-                // MPEG-TS discontinuity threshold is 10 seconds).
-                if (deficit < -0.5 - timeBase * rate / SamplesPerFrame || missing * SamplesPerFrame >= 10.0 * rate)
+                // Adjacent VOD parts may overlap by a few AAC frames. Keep those packets
+                // back-to-back; pause padding until the source clock catches up. A local
+                // overlap must not discard unrelated gaps in the rest of the track.
+                // Keep the MPEG-TS discontinuity guard in both directions.
+                if (Math.Abs(deficit) * SamplesPerFrame >= 10.0 * rate)
                     return null;
                 if (missing > 0)
                 {
