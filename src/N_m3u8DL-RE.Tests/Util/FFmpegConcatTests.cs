@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Globalization;
 using N_m3u8DL_RE.Enum;
+using N_m3u8DL_RE.Entity;
 using N_m3u8DL_RE.Util;
 using static N_m3u8DL_RE.Tests.TestSupport.DownloadTestHelper;
 
@@ -9,6 +10,54 @@ namespace N_m3u8DL_RE.Tests.Util;
 [Collection("Download console")]
 public class FFmpegConcatTests
 {
+    [Fact]
+    public async Task DetectsSparseAacByItsOwnClockAndKeepsOtherAudioTracks()
+    {
+        if (!HasTool("ffmpeg"))
+            return;
+        var root = Directory.CreateTempSubdirectory("aac-clock-").FullName;
+        try
+        {
+            var input = Path.Combine(root, "audio.ts");
+            await Run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=3",
+                "-filter_complex", "[0:a]asplit=3[a][b][c];[b]asetpts=PTS+0.5/TB[late];" +
+                "[c]aselect='not(between(t,1,1.3))'[gap]",
+                "-map", "[a]", "-map", "[late]", "-map", "[gap]", "-c:a:0", "ac3", "-c:a:1", "aac",
+                "-c:a:2", "aac", "-f", "mpegts", input);
+            var infos = new[] { "ac3", "aac (LC)", "aac (LC)" }.Select(codec =>
+                new Mediainfo { Type = "Audio", BaseInfo = codec }).ToList();
+            var tracks = await AacPacketClock.PrepareAsync("ffmpeg", ["-i", input], infos,
+                Path.Combine(root, "prepared"), false, default);
+            var repaired = Assert.Single(tracks);
+            Assert.Equal(2, repaired.AudioIndex);
+            Assert.True(File.Exists(repaired.Path));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(1024, 2048, 3072, 0)] // continuous
+    [InlineData(1080, 1990, 3072, 0)] // small positive and negative packet rounding
+    [InlineData(1024, 4608, 5632, 3)] // cumulative missing fraction rounds to nearest
+    [InlineData(1024, 1400, 3000, -1)] // would have to delete original audio
+    [InlineData(1024, 900000, 901024, -1)] // source clock discontinuity
+    public void SparsePacketPlanRespectsUncertainBoundaries(int second, int third, int fourth, int expected)
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllLines(path, ["#tb 0: 1/48000", "#sample_rate 0: 48000",
+                .. new[] { 0, second, third, fourth }.Select(pts => $"0,{pts},{pts},1024,7,0")]);
+            var plan = AacPacketClock.Plan(path, default);
+            if (expected < 0) Assert.Null(plan);
+            else Assert.Equal(expected, plan!.Insertions.Values.Sum());
+        }
+        finally { File.Delete(path); }
+    }
+
     [Theory]
     [InlineData("continuous", "mp4", false)]
     [InlineData("reset", "mp4", false)]

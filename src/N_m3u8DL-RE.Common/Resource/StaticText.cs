@@ -754,6 +754,18 @@ internal static class StaticText
             zhTW: "FFmpeg 合併輸入方式：LOCAL_HTTP 本機虛擬輸入(預設)，PROTOCOL 直接開啟全部分片，DEMUXER 使用檔案清單",
             enUS: "FFmpeg merge input: LOCAL_HTTP local virtual input (default), PROTOCOL opens all segments directly, DEMUXER uses a file list"
         ),
+        ["aacClockRepair"] = new TextContainer
+        (
+            zhCN: "音轨 {0} 的 AAC 时间戳有空隙，合并时保留原始音频包并补入静音帧。",
+            zhTW: "音軌 {0} 的 AAC 時間戳有空隙，合併時保留原始音訊包並補入靜音幀。",
+            enUS: "Filling AAC clock gaps on audio track {0} with silent frames during merge. Original audio packets are preserved."
+        ),
+        ["aacClockProbeFailed"] = new TextContainer
+        (
+            zhCN: "无法核实 AAC 采样时间，合并时保留原音轨。",
+            zhTW: "無法核實 AAC 取樣時間，合併時保留原音軌。",
+            enUS: "Could not verify AAC sample timing. Copying the original audio during merge."
+        ),
         ["muxTimestampRetry"] = new TextContainer
         (
             zhCN: "混流遇到缺失时间戳，尝试补齐视频包的输出时间戳后重试",

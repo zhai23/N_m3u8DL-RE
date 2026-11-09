@@ -126,6 +126,8 @@ public static class ResString
     public static string cmd_binaryMerge => GetText("cmd_binaryMerge");
     public static string cmd_ffmpegConcatMode => GetText("cmd_ffmpegConcatMode");
     public static string muxTimestampRetry => GetText("muxTimestampRetry");
+    public static string aacClockRepair => GetText("aacClockRepair");
+    public static string aacClockProbeFailed => GetText("aacClockProbeFailed");
     public static string ffmpegConcatInputFailed => GetText("ffmpegConcatInputFailed");
     public static string concatInputLengthChanged => GetText("concatInputLengthChanged");
     public static string cmd_useFFmpegConcatDemuxer => GetText("cmd_useFFmpegConcatDemuxer");
