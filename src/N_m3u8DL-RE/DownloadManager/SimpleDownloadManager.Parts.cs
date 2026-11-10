@@ -30,6 +30,10 @@ internal partial class SimpleDownloadManager
         var logMessages = new HashSet<string>();
         var cache = new VodInitCache(Path.Combine(partsDir, "_init-cache"));
         var sharedInitInfoCache = new VodInitInfoCache(DownloaderConfig.MyOptions.FFmpegBinaryPath!);
+        var deferTsRemux = parts.Count > 1 && IsSingleHlsTs(stream) &&
+            DownloaderConfig.MyOptions is { SkipMerge: false, BinaryMerge: false, EffectiveConcatMode: not FFmpegConcatMode.DEMUXER } &&
+            parts.SelectMany(p => p.MediaSegments).All(s =>
+                s.EncryptInfo.Method is EncryptMethod.NONE or EncryptMethod.AES_128 or EncryptMethod.AES_128_ECB or EncryptMethod.CHACHA20);
 
         for (var i = 0; i < parts.Count; i++)
         {
@@ -73,7 +77,7 @@ internal partial class SimpleDownloadManager
             manager.hlsMediaOrigins = hlsMediaOrigins;
             manager.hlsMediaReady = hlsMediaReady;
             manager.hlsSubtitleOnlyCuts = hlsSubtitleOnlyCuts;
-            if (!await manager.DownloadStreamAsync(partStream, task, speed, isPart: true))
+            if (!await manager.DownloadStreamAsync(partStream, task, speed, isPart: true, deferTsRemux: deferTsRemux))
                 return false;
             if (options.SkipMerge)
                 continue;
@@ -106,6 +110,8 @@ internal partial class SimpleDownloadManager
                     ":" + Regex.Match(info.BaseInfo ?? "", @"^aac \([^)]*\)").Value : "")))).Distinct().ToList();
         if (!binaryMerge && signatures.Count > 1)
             throw new NotSupportedException(ResString.vodPartsIncompatible);
+        if (deferTsRemux && !await RemuxTsRunsAsync(parts, outputs, processing))
+            return false;
         var first = outputs[0];
         var saveName = !string.IsNullOrWhiteSpace(DownloaderConfig.MyOptions.SavePattern)
             ? OtherUtil.FormatSavePattern(DownloaderConfig.MyOptions.SavePattern, stream, DownloaderConfig.MyOptions.SaveName, task.Id)
@@ -122,8 +128,8 @@ internal partial class SimpleDownloadManager
 
         // 单段且没有裁剪/输出偏移时，子下载器的合并结果就是最终文件。
         // 转封装时，若其它媒体轨道需要保留公共时间轴，本轨道也需要完成时间轴归一化。
-        var copySingle = outputs.Count == 1 && SelectedSteams.Where(s => s.MediaType != MediaType.SUBTITLES)
-            .All(CanUseSinglePartOutput);
+        var copySingle = outputs.Count == 1 && (deferTsRemux ||
+            SelectedSteams.Where(s => s.MediaType != MediaType.SUBTITLES).All(CanUseSinglePartOutput));
         bool success;
         if (subtitle)
         {
@@ -177,6 +183,45 @@ internal partial class SimpleDownloadManager
             OtherUtil.SafeDeleteDir(partsDir);
         }
         processing?.Report(new(Bytes: new FileInfo(outputPath).Length));
+        return true;
+    }
+
+    private async Task<bool> RemuxTsRunsAsync(List<MediaPart> parts, List<OutputFile> outputs, MediaProcessingProgress? processing)
+    {
+        var options = DownloaderConfig.MyOptions;
+        for (var i = 0; i < outputs.Count; i++)
+        {
+            var output = outputs[i];
+            if (output.Segments == null)
+                continue;
+            var end = i;
+            while (end + 1 < outputs.Count && outputs[end + 1].Segments is { } next &&
+                   outputs[end].Mediainfos.Select(m => (m.Type, m.Id)).SequenceEqual(outputs[end + 1].Mediainfos.Select(m => (m.Type, m.Id))) &&
+                   await HlsTsContinuity.IsContinuousAsync(options.FFmpegBinaryPath!, outputs[end].Segments![^1], next[0]))
+                end++;
+
+            // 只在时钟真正中断处独立转封装，连续正文沿用同一个解复用器和音视频时间原点。
+            var count = end - i + 1;
+            var files = outputs.GetRange(i, count).SelectMany(o => o.Segments!).ToArray();
+            var run = parts.GetRange(i, count);
+            var duration = run.Sum(p => p.OutputDuration ?? p.MediaSegments.Sum(s => s.Duration));
+            processing?.Begin(ResString.processingMerge, logStart: false);
+            if (MergeUtil.ShouldPartialMerge(files.Length, options.EffectiveConcatMode))
+                files = MergeUtil.PartialCombineMultipleFiles(files, processing == null ? null : processing.Report);
+            if (!MergeUtil.MergeByFFmpeg(options.FFmpegBinaryPath!, files, Path.ChangeExtension(output.FilePath, null),
+                Path.GetExtension(output.FilePath)[1..], UsesAacFilter(output.Mediainfos), writeDate: !options.NoDateInfo, concatMode: options.EffectiveConcatMode,
+                progress: processing == null ? null : processing.Report, duration: duration, mediaInfos: output.Mediainfos,
+                preserveInitialNonKeyFrames: count != outputs.Count))
+                return false;
+            output.Segments = null;
+            if (count > 1)
+            {
+                parts[i] = parts[i].WithSegments(run.SelectMany(p => p.MediaSegments).ToList());
+                parts[i].OutputDuration = duration;
+                parts.RemoveRange(i + 1, count - 1);
+                outputs.RemoveRange(i + 1, count - 1);
+            }
+        }
         return true;
     }
 

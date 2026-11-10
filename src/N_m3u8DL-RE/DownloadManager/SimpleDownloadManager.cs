@@ -88,7 +88,7 @@ internal partial class SimpleDownloadManager
             LogPartOnce("autoBinaryMerge5", () => Logger.WarnMarkUp($"[darkorange3_1]{ResString.autoBinaryMerge5}[/]"));
         }
 
-        if (mediainfos.Where(m => m.Type == "Audio").All(m => m.BaseInfo!.Contains("aac")))
+        if (UsesAacFilter(mediainfos))
         {
             useAACFilter = true;
         }
@@ -113,17 +113,23 @@ internal partial class SimpleDownloadManager
         return MediainfoUtil.ReadInfoAsync(DownloaderConfig.MyOptions.FFmpegBinaryPath!, file);
     }
 
+    private static bool UsesAacFilter(List<Mediainfo> infos) =>
+        infos.Where(info => info.Type == "Audio").All(info => info.BaseInfo!.Contains("aac"));
+
+    private bool IsSingleHlsTs(StreamSpec stream) =>
+        StreamExtractor.ExtractorType == ExtractorType.HLS && stream.MediaType != MediaType.SUBTITLES &&
+        stream.Extension is null or "ts" && SelectedSteams.Count == 1 && hlsMediaOrigins == null &&
+        stream.Playlist!.MediaParts.All(part => part.MediaInit == null && part.PeriodIndex == null);
+
     private bool CanDownloadHlsTsTogether(StreamSpec stream)
     {
-        if (StreamExtractor.ExtractorType != ExtractorType.HLS || stream.MediaType == MediaType.SUBTITLES ||
-            stream.Extension is not (null or "ts") || SelectedSteams.Count != 1 || hlsMediaOrigins != null ||
-            stream.Playlist!.MediaParts.Any(part => part.MediaInit != null || part.PeriodIndex != null))
+        if (!IsSingleHlsTs(stream))
             return false;
         // 连续范围选择只改变首尾分片，不应触发逐 part 转封装；起始源时间可以不为零。
         // 真正删除中间内容时仍保留原有时间轴重排，分片序号也不能互相覆盖。
         long? previousIndex = null;
         double? expectedSourceTime = null;
-        foreach (var segment in stream.Playlist.MediaParts.SelectMany(part => part.MediaSegments))
+        foreach (var segment in stream.Playlist!.MediaParts.SelectMany(part => part.MediaSegments))
         {
             // 调用方可能未捕获 SourceTime，原始分片序号仍可识别中间被删除的片段。
             if (previousIndex is { } previous && segment.Index != previous + 1)
@@ -139,7 +145,8 @@ internal partial class SimpleDownloadManager
         return true;
     }
 
-    private async Task<bool> DownloadStreamAsync(StreamSpec streamSpec, ProgressTask task, SpeedContainer speedContainer, bool isPart = false)
+    private async Task<bool> DownloadStreamAsync(StreamSpec streamSpec, ProgressTask task, SpeedContainer speedContainer,
+        bool isPart = false, bool deferTsRemux = false)
     {
         // HLS 文本字幕可能使用连续 PTS，也可能在 discontinuity 重启。
         // 有共享媒体原点或纯字幕裁剪时按 part 映射；未裁剪的纯字幕沿用原有逐片修复流程。
@@ -789,6 +796,12 @@ internal partial class SimpleDownloadManager
                     Logger.WarnMarkUp($"{Path.GetFileName(ffOut)} => {Path.GetFileName(finalFfOut)}");
                     ffOut = finalFfOut;
                 }
+                // 广告前后可能仍是同一条 TS。拿到两侧原始分片后再决定在哪里转封装。
+                if (deferTsRemux && string.IsNullOrEmpty(currentKID))
+                {
+                    RecordOutput(ffOut, files);
+                    return true;
+                }
                 // 兼容旧参数；只有直接 concat 协议受命令行长度和分片句柄数量限制。
                 var concatMode = DownloaderConfig.MyOptions.EffectiveConcatMode;
                 if (MergeUtil.ShouldPartialMerge(files.Length, concatMode))
@@ -878,12 +891,18 @@ internal partial class SimpleDownloadManager
 
         // 记录所有文件信息
         if (File.Exists(output))
+            RecordOutput(output);
+        processing?.Report(new(Bytes: new FileInfo(output).Length));
+        return true;
+
+        void RecordOutput(string path, string[]? files = null)
         {
             lock (OutputFiles)
                 OutputFiles.Add(new OutputFile()
                 {
                     Index = task.Id,
-                    FilePath = output,
+                    FilePath = path,
+                    Segments = files,
                     Duration = streamSpec.Playlist.TotalDuration,
                     LangCode = streamSpec.Language,
                     Description = streamSpec.Name,
@@ -891,9 +910,6 @@ internal partial class SimpleDownloadManager
                     MediaType = streamSpec.MediaType,
                 });
         }
-
-        processing?.Report(new(Bytes: new FileInfo(output).Length));
-        return true;
     }
 
     public async Task<bool> StartDownloadAsync()

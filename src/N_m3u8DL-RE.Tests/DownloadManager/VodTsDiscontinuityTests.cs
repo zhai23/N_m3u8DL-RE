@@ -1,3 +1,4 @@
+using System.Globalization;
 using N_m3u8DL_RE.Config;
 using N_m3u8DL_RE.DownloadManager;
 using N_m3u8DL_RE.Entity;
@@ -12,6 +13,71 @@ namespace N_m3u8DL_RE.Tests.DownloadManager;
 [Collection("Download console")]
 public class VodTsDiscontinuityTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FilteringAdKeepsContinuousPacketsAndClosesActualTimestampGaps(bool insertedAd)
+    {
+        if (!HasTool("ffmpeg") || !HasTool("ffprobe")) return;
+        var root = Directory.CreateTempSubdirectory("vod-ts-ad-").FullName;
+        try
+        {
+            await Run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=25",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "6",
+                "-c:v", "libx264", "-g", "50", "-bf", "3", "-sc_threshold", "0", "-c:a", "aac",
+                "-f", "hls", "-hls_time", "2", "-hls_segment_filename", Path.Combine(root, "seg%d.ts"),
+                Path.Combine(root, "clean.m3u8"));
+            // 一种清单在连续正文中插入独立广告，另一种将源时间轴中的两秒标为广告。
+            var manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nseg0.ts\n" +
+                "#EXT-X-DISCONTINUITY\n#EXTINF:2,\nadjump.ts\n#EXT-X-DISCONTINUITY\n" +
+                (insertedAd ? "#EXTINF:2,\nseg1.ts\n" : "") + "#EXTINF:2,\nseg2.ts\n#EXT-X-ENDLIST\n";
+            await using var server = new MediaFixtureServer(root, (path, _) => path == "source.m3u8" ? manifest : null);
+            using var extractor = new StreamExtractor(new ParserConfig());
+            await extractor.LoadSourceFromUrlAsync(server.Url + "source.m3u8");
+            var streams = await extractor.ExtractStreamsAsync();
+            await extractor.FetchPlayListAsync(streams);
+            VodStreamPlanner.CaptureHlsTimeline(streams);
+            var options = CreateOptions(root);
+            options.AdKeywords = ["adjump"];
+            FilterUtil.CleanAd(streams, options.AdKeywords);
+            VodStreamPlanner.AlignHlsDiscontinuities(streams);
+            var manager = new SimpleDownloadManager(new DownloaderConfig
+                { MyOptions = options, DirPrefix = Path.Combine(root, "tmp") }, streams, extractor);
+
+            Assert.True(await manager.StartDownloadAsync());
+            Assert.Equal(0, server.RequestCount("adjump.ts"));
+            var output = Assert.Single(Directory.GetFiles(options.SaveDir!, "*.mp4"));
+            if (insertedAd)
+            {
+                var reference = Path.Combine(root, "reference.mp4");
+                var files = Enumerable.Range(0, 3).Select(i => Path.Combine(root, $"seg{i}.ts"));
+                await Run("ffmpeg", "-v", "error", "-i", "concat:" + string.Join('|', files),
+                    "-map", "0:v", "-map", "0:a", "-c", "copy", reference);
+                // 同一正文无损拼接后，两条轨道上的每个包都应保留原来的 PTS 和 DTS。
+                foreach (var track in new[] { "v", "a" })
+                    Assert.Equal(await PacketTimes(reference, track), await PacketTimes(output, track));
+            }
+            else
+            {
+                Assert.Equal(0, server.RequestCount("seg1.ts"));
+                var video = await PacketTimes(output, "v");
+                Assert.Equal(100, video.Length);
+                // 允许 B 帧重排与 AAC 帧边界留下少量首尾偏移，两轨均应闭合两秒缺口。
+                foreach (var packets in new[] { video, await PacketTimes(output, "a") })
+                {
+                    var end = packets.Max(row => double.Parse(row.Split(',')[0], CultureInfo.InvariantCulture));
+                    Assert.InRange(end, 3.9, 4.15);
+                }
+            }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static async Task<string[]> PacketTimes(string file, string track) =>
+        (await Run("ffprobe", "-v", "error", "-select_streams", track, "-show_packets",
+            "-show_entries", "packet=pts_time,dts_time", "-of", "csv=p=0", file))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
     [Fact]
     public async Task TimeRangeAcrossDiscontinuityKeepsReferencesBetweenSelectedSegments()
     {
